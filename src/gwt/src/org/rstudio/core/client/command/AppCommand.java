@@ -59,6 +59,18 @@ public class AppCommand implements Command, ClickHandler, ImageResourceProvider
          synced_ = synced;
       }
 
+      public CommandToolbarButton(String buttonLabel,
+                                  String buttonTitle,
+                                  ImageResourceProvider imageResourceProvider,
+                                  ClickHandler clickHandler,
+                                  AppCommand command,
+                                  boolean synced)
+      {
+         super(buttonLabel, buttonTitle, imageResourceProvider, clickHandler);
+         command_ = command;
+         synced_ = synced;
+      }
+
       @Override
       protected void onAttach()
       {
@@ -88,7 +100,7 @@ public class AppCommand implements Command, ClickHandler, ImageResourceProvider
          }
       }
 
-      public void onEnabledChanged(AppCommand command)
+      public void onEnabledChanged(EnabledChangedEvent event)
       {
          setEnabled(command_.isEnabled());
       }
@@ -96,15 +108,10 @@ public class AppCommand implements Command, ClickHandler, ImageResourceProvider
       public void onVisibleChanged(VisibleChangedEvent event)
       {
          setVisible(command_.isVisible());
-         if (command_.isVisible())
+         if (command_.isEnabled())
             setEnabled(command_.isEnabled());
 
          parentToolbar_.invalidateSeparators();
-      }
-
-      public boolean hasSourceColumn()
-      {
-         return false;
       }
 
       protected final AppCommand command_;
@@ -120,10 +127,11 @@ public class AppCommand implements Command, ClickHandler, ImageResourceProvider
       public CommandSourceColumnToolbarButton(String buttonLabel,
                                               String buttonTitle,
                                               ImageResourceProvider imageResourceProvider,
+                                              ClickHandler clickHandler,
                                               AppCommand command,
                                               boolean synced,
                                               SourceColumn column)     {
-         super(buttonLabel, buttonTitle, imageResourceProvider, command, synced);
+         super(buttonLabel, buttonTitle, imageResourceProvider, clickHandler, command, synced);
          column_ = column;
       }
 
@@ -131,28 +139,44 @@ public class AppCommand implements Command, ClickHandler, ImageResourceProvider
       protected void onAttach()
       {
          super.onAttach();
+
+         if (isVisible())
+            setEnabled(true);
       }
 
       @Override
-      public boolean hasSourceColumn()
+      public void onEnabledChanged(EnabledChangedEvent event)
       {
-         return true;
+         if (!StringUtil.equals(column_.getName(), event.getColumnName()))
+            return;
+         setEnabled(isVisible());
       }
 
-      public SourceColumn getSourceColumn()
-      {
-         return column_;
-      }
-
+      @Override
       public void onVisibleChanged(VisibleChangedEvent event)
       {
-         if (StringUtil.equals(event.getColumnName(), column_.getName()))
+         if (!StringUtil.equals(column_.getName(), event.getColumnName()))
+            return;
+
+         if (updatePending_)
          {
             setVisible(command_.isVisible());
-            parentToolbar_.invalidateSeparators();
+            if (command_.isVisible())
+               setEnabled(command_.isEnabled());
+            updatePending_ = false;
          }
+         // once visibility is enabled don't disable it
+         // the button should be enabled regardless of if the command is enabled
+         else if (command_.isVisible())
+         {
+            setVisible(true);
+            setEnabled(true);
+         }
+
+         parentToolbar_.invalidateSeparators();
       }
 
+      private boolean updatePending_ = false;
       private SourceColumn column_;
    }
 
@@ -160,7 +184,7 @@ public class AppCommand implements Command, ClickHandler, ImageResourceProvider
    {
       if (Desktop.hasDesktopFrame())
       {
-         addEnabledChangedHandler((command) -> DesktopMenuCallback.setCommandEnabled(id_, enabled_));
+         addEnabledChangedHandler((event) -> DesktopMenuCallback.setCommandEnabled(id_, enabled_));
          addVisibleChangedHandler((event) -> DesktopMenuCallback.setCommandVisible(id_, visible_));
       }
    }
@@ -179,6 +203,12 @@ public class AppCommand implements Command, ClickHandler, ImageResourceProvider
    
    private void doExecute()
    {
+      if (!StringUtil.isNullOrEmpty(sourceColumnName_))
+      {
+         SourceColumnManager mgr = RStudioGinjector.INSTANCE.getSourceColumnManager();
+         mgr.setActive(sourceColumnName_);
+      }
+
       assert enabled_ : "AppCommand executed when it was not enabled";
       if (!enabled_)
          return;
@@ -220,15 +250,10 @@ public class AppCommand implements Command, ClickHandler, ImageResourceProvider
                   : "AppCommand executed but nobody was listening: " + getId();
       }
 
-      if (!StringUtil.isNullOrEmpty(sourceColumnName_))
-      {
-         SourceColumnManager mgr = RStudioGinjector.INSTANCE.getSourceColumnManager();
-         mgr.setActive(sourceColumnName_);
-      }
-
       CommandEvent event = new CommandEvent(this);
       RStudioGinjector.INSTANCE.getEventBus().fireEvent(event);
       handlers_.fireEvent(event);
+      sourceColumnName_ = null;
    }
 
    public boolean isEnabled()
@@ -254,6 +279,15 @@ public class AppCommand implements Command, ClickHandler, ImageResourceProvider
       {
          enabled_ = enabled;
          handlers_.fireEvent(new EnabledChangedEvent(this));
+      }
+   }
+
+   public void setEnabled(boolean enabled, String sourceColumnName)
+   {
+      if (enabled != enabled_)
+      {
+         enabled_ = enabled;
+         handlers_.fireEvent(new EnabledChangedEvent(this, sourceColumnName));
       }
    }
 
@@ -600,15 +634,18 @@ public class AppCommand implements Command, ClickHandler, ImageResourceProvider
    public ToolbarButton createToolbarButton(boolean synced, SourceColumn column)
    {
       CommandSourceColumnToolbarButton button =
-         new CommandSourceColumnToolbarButton(getButtonLabel(),
-                                              getDesc(),
-                                              this,
-                                              this,
-                                              synced,
-                                              column);
+            new CommandSourceColumnToolbarButton(getButtonLabel(),
+                                                 getDesc(),
+                                                 this,
+                                                 event -> {
+                                                    sourceColumnName_ = column.getName();
+                                                    execute();
+                                                 },
+                                                 this,
+                                                 synced,
+                                                 column);
       if (getTooltip() != null)
          button.setTitle(getTooltip());
-      sourceColumnName_ = column.getName();
       return button;
    }
 
@@ -790,11 +827,6 @@ public class AppCommand implements Command, ClickHandler, ImageResourceProvider
       return executedFromShortcut_;
    }
 
-   public String getSourceColumnName()
-   {
-      return sourceColumnName_;
-   }
-   
    public static void disableNoHandlerAssertions()
    {
       enableNoHandlerAssertions_ = false;
@@ -861,7 +893,7 @@ public class AppCommand implements Command, ClickHandler, ImageResourceProvider
    private ImageResource rightImage_ = null;
    private String rightImageDesc_ = null;
    private String sourceColumnName_;
-   
+
    private boolean executedFromShortcut_ = false;
  
    private static boolean enableNoHandlerAssertions_ = true;
